@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,26 @@ func TestEventSinkPanicIsRecovered(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "workflow event sink panic") {
 		t.Fatalf("expected event sink panic log, got %q", logs.String())
+	}
+}
+
+func TestAsyncEventSink(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	received := make(chan Event, 2)
+	sink := NewAsyncEventSink(ctx, 2, EventSinkFunc(func(event Event) {
+		received <- event
+	}))
+
+	sink.Emit(Event{Type: EventFlowStarted})
+	sink.Emit(Event{Type: EventFlowFinished})
+	sink.Close()
+
+	got := []EventType{(<-received).Type, (<-received).Type}
+	want := []EventType{EventFlowStarted, EventFlowFinished}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
 
@@ -237,6 +258,30 @@ func TestFlowAndNodeErrorEdges(t *testing.T) {
 	}
 }
 
+func TestStrictRoutingMissingSuccessor(t *testing.T) {
+	start := NewFuncNode(NodeMeta{ID: "start"}).
+		SetPost(func(ctx *RunContext, prepResult any, execResult any) (string, error) {
+			return "missing", nil
+		})
+	start.Core().NextAction("known", NewFuncNode(NodeMeta{ID: "known"}))
+
+	_, err := NewFlow("strict", start).SetStrictRouting(true).RunWithContext(NewRunContext(context.Background(), nil, nil))
+	if err == nil {
+		t.Fatal("strict routing should return error for missing successor")
+	}
+	if !errors.Is(err, ErrMissingSuccessor) {
+		t.Fatalf("errors.Is missing successor failed: %v", err)
+	}
+
+	var wfErr *WorkflowError
+	if !errors.As(err, &wfErr) {
+		t.Fatalf("error %T should be WorkflowError", err)
+	}
+	if wfErr.Code != ErrCodeRoutingFailed {
+		t.Fatalf("code = %s, want %s", wfErr.Code, ErrCodeRoutingFailed)
+	}
+}
+
 func TestBatchNodeErrorEdges(t *testing.T) {
 	prepErr := errors.New("prep failed")
 	prepNode := NewBatchNode(NodeMeta{ID: "prep-fail"}).
@@ -378,6 +423,43 @@ func TestCoreAndFlowOptionPanicsAndDefaults(t *testing.T) {
 	parallelFlow := NewParallelBatchFlow("default-parallel-flow", NewFuncNode(NodeMeta{ID: "start"}), 0)
 	if parallelFlow.MaxConcurrency != 8 {
 		t.Fatalf("default flow MaxConcurrency = %d, want 8", parallelFlow.MaxConcurrency)
+	}
+}
+
+func TestErrorReturningConstructors(t *testing.T) {
+	if _, err := NewFlowE("", nil); err == nil {
+		t.Fatal("NewFlowE expected error")
+	}
+	if _, err := NewCoreNodeE(NodeMeta{}); err == nil {
+		t.Fatal("NewCoreNodeE expected error")
+	}
+	if _, err := NewFuncNodeE(NodeMeta{}); err == nil {
+		t.Fatal("NewFuncNodeE expected error")
+	}
+	if _, err := NewBatchNodeE(NodeMeta{}); err == nil {
+		t.Fatal("NewBatchNodeE expected error")
+	}
+	if _, err := NewParallelBatchNodeE(NodeMeta{}, 1); err == nil {
+		t.Fatal("NewParallelBatchNodeE expected error")
+	}
+	if _, err := NewBatchFlowE("", nil); err == nil {
+		t.Fatal("NewBatchFlowE expected error")
+	}
+	if _, err := NewParallelBatchFlowE("", nil, 1); err == nil {
+		t.Fatal("NewParallelBatchFlowE expected error")
+	}
+
+	if _, err := NewFlowE("ok", nil); err != nil {
+		t.Fatalf("NewFlowE returned error: %v", err)
+	}
+	if _, err := NewFuncNodeE(NodeMeta{ID: "ok"}); err != nil {
+		t.Fatalf("NewFuncNodeE returned error: %v", err)
+	}
+	if _, err := NewBatchNodeE(NodeMeta{ID: "ok"}); err != nil {
+		t.Fatalf("NewBatchNodeE returned error: %v", err)
+	}
+	if _, err := NewParallelBatchNodeE(NodeMeta{ID: "ok"}, 1); err != nil {
+		t.Fatalf("NewParallelBatchNodeE returned error: %v", err)
 	}
 }
 

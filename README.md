@@ -199,6 +199,14 @@ flow.SetTimeout(30 * time.Second)
 node.Core().SetTimeout(3 * time.Second)
 ```
 
+默认情况下，节点返回未注册 action 会结束当前分支。需要严格路由时可以开启：
+
+```go
+flow.SetStrictRouting(true)
+```
+
+开启后，未匹配 action 会返回 `ErrMissingSuccessor`，错误码为 `routing_failed`。
+
 节点、批处理节点和批处理流程中的 panic 会被转换为 `WorkflowError`，stage 为 `panic`，并保留 `Stack` 便于诊断。
 
 ## 批处理节点
@@ -227,6 +235,7 @@ parallel.FailFast = true
 ```
 
 `ParallelBatchNode` 会保持 `results` 与输入 item 的索引一致。`FailFast` 为 `true` 时，首个错误会取消尚未开始或正在等待的任务。
+内部使用固定 worker pool，不会为每个 item 创建一个 goroutine。
 
 ## 批处理流程
 
@@ -265,6 +274,14 @@ rc.Events = workflow.EventSinkFunc(func(event workflow.Event) {
 })
 
 _, err := flow.RunWithContext(rc)
+```
+
+如果事件处理较慢，可以使用内置异步包装：
+
+```go
+asyncSink := workflow.NewAsyncEventSink(context.Background(), 1024, rc.Events)
+defer asyncSink.Close()
+rc.Events = asyncSink
 ```
 
 事件类型包括：
@@ -315,6 +332,8 @@ if errors.As(err, &wfErr) {
 ## 当前限制
 
 - 没有持久化执行状态，进程退出后运行状态不会恢复。
-- 没有 DAG 静态校验，错误 action 或环路需要调用方自行设计和测试。
-- 没有内置超时策略，应通过传入的 `context.Context` 控制。
+- 不做调度、队列、权限、多租户、审批、UI、审计后台等平台能力。
+- 不内置幂等、补偿事务、限流、熔断；这些由业务平台或节点内部实现。
+- 超时基于 `context.Context`，无法强杀忽略 `ctx.Done()` 的 goroutine。
+- 静态校验默认将环路视为错误；如果业务需要循环，应在上层控制退出条件。
 - `Params` 和 `Shared` 都是浅拷贝语义，复杂对象的并发安全由调用方负责。

@@ -48,6 +48,18 @@ func NewBatchNode(meta NodeMeta) *BatchNode {
 	}
 }
 
+// NewBatchNodeE 创建 BatchNode，并用 error 返回配置错误。
+func NewBatchNodeE(meta NodeMeta) (*BatchNode, error) {
+	if meta.Type == "" {
+		meta.Type = "batch"
+	}
+	if _, err := NewCoreNodeE(meta); err != nil {
+		return nil, err
+	}
+
+	return NewBatchNode(meta), nil
+}
+
 // Core 返回节点共享的核心配置。
 func (n *BatchNode) Core() *CoreNode {
 	return n.core
@@ -243,6 +255,18 @@ func NewParallelBatchNode(meta NodeMeta, maxConcurrency int) *ParallelBatchNode 
 	}
 }
 
+// NewParallelBatchNodeE 创建 ParallelBatchNode，并用 error 返回配置错误。
+func NewParallelBatchNodeE(meta NodeMeta, maxConcurrency int) (*ParallelBatchNode, error) {
+	if meta.Type == "" {
+		meta.Type = "parallel_batch"
+	}
+	if _, err := NewCoreNodeE(meta); err != nil {
+		return nil, err
+	}
+
+	return NewParallelBatchNode(meta, maxConcurrency), nil
+}
+
 // SetPrep 替换批处理准备回调，并返回 ParallelBatchNode 以支持链式调用。
 func (n *ParallelBatchNode) SetPrep(f BatchPrepFunc) *ParallelBatchNode {
 	n.PrepFunc = f
@@ -308,8 +332,12 @@ func (n *ParallelBatchNode) Run(ctx *RunContext) (action string, err error) {
 	childCtx := *ctx
 	childCtx.Context = runCtx
 
-	// sem 限制同一时间执行 item 工作的 goroutine 数量。
-	sem := make(chan struct{}, n.MaxConcurrency)
+	type batchJob struct {
+		index int
+		item  any
+	}
+
+	jobs := make(chan batchJob)
 	var wg sync.WaitGroup
 
 	var errMu sync.Mutex
@@ -332,39 +360,47 @@ func (n *ParallelBatchNode) Run(ctx *RunContext) (action string, err error) {
 		}
 	}
 
+	workerCount := n.MaxConcurrency
+	if len(items) < workerCount {
+		workerCount = len(items)
+	}
+
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for job := range jobs {
+				if runCtx.Err() != nil && n.FailFast {
+					setErr(runCtx.Err())
+					return
+				}
+
+				result, err := n.execItemWithRetry(&childCtx, job.item, job.index)
+				if err != nil {
+					setErr(err)
+					return
+				}
+
+				results[job.index] = result
+			}
+		}()
+	}
+
+enqueue:
 	for i, item := range items {
 		if runCtx.Err() != nil && n.FailFast {
 			break
 		}
 
-		i := i
-		item := item
-
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			select {
-			case <-runCtx.Done():
-				setErr(runCtx.Err())
-				return
-			case sem <- struct{}{}:
-			}
-
-			defer func() {
-				<-sem
-			}()
-
-			result, err := n.execItemWithRetry(&childCtx, item, i)
-			if err != nil {
-				setErr(err)
-				return
-			}
-
-			results[i] = result
-		}()
+		select {
+		case <-runCtx.Done():
+			setErr(runCtx.Err())
+			break enqueue
+		case jobs <- batchJob{index: i, item: item}:
+		}
 	}
+	close(jobs)
 
 	wg.Wait()
 

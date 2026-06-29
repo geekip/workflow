@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -145,6 +146,15 @@ func NewCoreNode(meta NodeMeta) *CoreNode {
 		retry:      RetryPolicy{MaxRetries: 1},
 		successors: map[string]Node{},
 	}
+}
+
+// NewCoreNodeE 创建 CoreNode，并用 error 返回配置错误。
+func NewCoreNodeE(meta NodeMeta) (*CoreNode, error) {
+	if meta.ID == "" {
+		return nil, errors.New("node id cannot be empty")
+	}
+
+	return NewCoreNode(meta), nil
 }
 
 // Meta 返回当前节点的不可变元数据。
@@ -343,6 +353,15 @@ func NewFuncNode(meta NodeMeta) *FuncNode {
 			return DefaultAction, nil
 		},
 	}
+}
+
+// NewFuncNodeE 创建 FuncNode，并用 error 返回配置错误。
+func NewFuncNodeE(meta NodeMeta) (*FuncNode, error) {
+	if _, err := NewCoreNodeE(meta); err != nil {
+		return nil, err
+	}
+
+	return NewFuncNode(meta), nil
 }
 
 // Core 返回节点共享的核心配置。

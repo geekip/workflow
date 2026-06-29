@@ -12,6 +12,13 @@
 flow := workflow.NewFlow("demo", startNode)
 ```
 
+如果不希望构造函数在配置错误时 panic，可以使用返回 error 的版本：
+
+```go
+flow, err := workflow.NewFlowE("demo", startNode)
+node, err := workflow.NewFuncNodeE(workflow.NodeMeta{ID: "node"})
+```
+
 ### Node
 
 `Node` 是最小执行单元。内置节点包括：
@@ -233,19 +240,41 @@ if err := flow.Validate(); err != nil {
 
 如果业务确实需要循环流程，应跳过 `Validate` 或在上层实现最大循环次数、退出条件和超时保护。
 
+## 严格路由
+
+默认情况下，节点返回未注册 action 会结束当前分支。对生产关键流程，可以开启 strict routing：
+
+```go
+flow.SetStrictRouting(true)
+```
+
+开启后，如果当前节点存在 successor 但没有匹配 action，流程会返回 `ErrMissingSuccessor`，错误码为 `routing_failed`。
+
 ## 事件监听
 
 ```go
 rc := workflow.NewRunContext(context.Background(), workflow.NewShared(nil), nil)
 rc.Events = workflow.EventSinkFunc(func(event workflow.Event) {
 	fmt.Printf("%s flow=%s run=%s node=%s action=%s err=%s\n",
-		event.Type, event.FlowID, event.RunID, event.NodeID, event.Action, event.Error)
+	event.Type, event.FlowID, event.RunID, event.NodeID, event.Action, event.Error)
 })
 
 _, err := flow.RunWithContext(rc)
 ```
 
 事件接收器中的 panic 会被恢复，并通过 `RunContext.Logger` 记录，不会打断主流程。
+
+慢事件处理可以用 `AsyncEventSink` 隔离：
+
+```go
+baseSink := workflow.EventSinkFunc(func(event workflow.Event) {
+	// 写日志、指标或 trace。
+})
+asyncSink := workflow.NewAsyncEventSink(context.Background(), 1024, baseSink)
+defer asyncSink.Close()
+
+rc.Events = asyncSink
+```
 
 ## 错误处理
 

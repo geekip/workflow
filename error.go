@@ -7,6 +7,9 @@ import (
 	"runtime/debug"
 )
 
+// ErrMissingSuccessor 表示 strict routing 模式下 action 没有匹配的后继节点。
+var ErrMissingSuccessor = errors.New("workflow missing successor")
+
 // Stage 标识错误发生的执行阶段。
 type Stage string
 
@@ -34,6 +37,7 @@ const (
 	ErrCodeCancelled      ErrorCode = "cancelled"
 	ErrCodePanic          ErrorCode = "panic"
 	ErrCodeValidation     ErrorCode = "validation_failed"
+	ErrCodeRoutingFailed  ErrorCode = "routing_failed"
 )
 
 // WorkflowError 使用工作流阶段和节点上下文包装底层错误。
@@ -121,6 +125,11 @@ func errorCodeFor(stage Stage, err error) ErrorCode {
 		return ErrCodeBatchFailed
 	case StagePanic:
 		return ErrCodePanic
+	case StageFlow:
+		if errors.Is(err, ErrMissingSuccessor) {
+			return ErrCodeRoutingFailed
+		}
+		return ErrCodeFlowFailed
 	default:
 		return ErrCodeFlowFailed
 	}

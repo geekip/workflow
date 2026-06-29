@@ -16,6 +16,7 @@
 - 重试与 fallback。
 - 串行和并行批处理。
 - 生命周期事件。
+- 可选异步事件包装。
 - 结构化错误。
 - panic 防护。
 - 静态流程图校验。
@@ -84,9 +85,11 @@ case result := <-work:
 
 ## 事件语义
 
-`EventSink` 是同步调用。sink panic 会被恢复并记录，不会中断主流程。
+`EventSink` 默认是同步调用。sink panic 会被恢复并记录，不会中断主流程。
 
-如果需要异步事件、缓冲、丢弃策略或 backpressure，建议业务平台在 `EventSink` 内自行投递到队列。
+库提供轻量 `AsyncEventSink`，用于把慢观测逻辑和主流程隔离。它使用内存缓冲，缓冲区满时保留 backpressure。
+
+如果需要持久化事件、丢弃策略、批量发送、跨进程队列或复杂 backpressure，建议业务平台在 `EventSink` 外层实现。
 
 ## 错误语义
 

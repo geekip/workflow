@@ -17,9 +17,10 @@ type Flow struct {
 	Name        string
 	Description string
 
-	Start   Node
-	Params  Params
-	timeout time.Duration
+	Start         Node
+	Params        Params
+	timeout       time.Duration
+	StrictRouting bool
 }
 
 // NewFlow 使用指定 id 和起始节点创建工作流。
@@ -33,6 +34,15 @@ func NewFlow(id string, start Node) *Flow {
 		Start:  start,
 		Params: Params{},
 	}
+}
+
+// NewFlowE 使用指定 id 和起始节点创建工作流，并用 error 返回配置错误。
+func NewFlowE(id string, start Node) (*Flow, error) {
+	if id == "" {
+		return nil, errors.New("flow id cannot be empty")
+	}
+
+	return NewFlow(id, start), nil
 }
 
 // SetParams 替换流程级默认参数。
@@ -53,6 +63,12 @@ func (f *Flow) SetTimeout(timeout time.Duration) *Flow {
 	}
 
 	f.timeout = timeout
+	return f
+}
+
+// SetStrictRouting 配置是否把未匹配 action 视为错误。
+func (f *Flow) SetStrictRouting(strict bool) *Flow {
+	f.StrictRouting = strict
 	return f
 }
 
@@ -181,7 +197,16 @@ func (f *Flow) orchestrate(ctx *RunContext, batchParams Params) (string, error) 
 		}
 
 		lastAction = normalizeAction(action)
-		current = core.GetNext(lastAction)
+		next := core.GetNext(lastAction)
+		if next == nil && f.StrictRouting && len(core.SuccessorsSnapshot()) > 0 {
+			return "", wrapErr(
+				StageFlow,
+				meta.ID,
+				fmt.Sprintf("no successor for action=%s", lastAction),
+				ErrMissingSuccessor,
+			)
+		}
+		current = next
 	}
 
 	return lastAction, nil
@@ -207,6 +232,15 @@ func NewBatchFlow(id string, start Node) *BatchFlow {
 			return DefaultAction, nil
 		},
 	}
+}
+
+// NewBatchFlowE 创建串行批处理流程，并用 error 返回配置错误。
+func NewBatchFlowE(id string, start Node) (*BatchFlow, error) {
+	if id == "" {
+		return nil, errors.New("flow id cannot be empty")
+	}
+
+	return NewBatchFlow(id, start), nil
 }
 
 // SetPrepBatch 替换用于准备每次运行参数集的钩子。
@@ -297,6 +331,15 @@ func NewParallelBatchFlow(id string, start Node, maxConcurrency int) *ParallelBa
 	}
 }
 
+// NewParallelBatchFlowE 创建并行批处理流程，并用 error 返回配置错误。
+func NewParallelBatchFlowE(id string, start Node, maxConcurrency int) (*ParallelBatchFlow, error) {
+	if id == "" {
+		return nil, errors.New("flow id cannot be empty")
+	}
+
+	return NewParallelBatchFlow(id, start, maxConcurrency), nil
+}
+
 // SetPrepBatch 替换用于准备每次运行参数集的钩子，并返回 ParallelBatchFlow 以支持链式调用。
 func (pf *ParallelBatchFlow) SetPrepBatch(f func(ctx *RunContext) ([]Params, error)) *ParallelBatchFlow {
 	pf.PrepBatchFunc = f
@@ -349,8 +392,12 @@ func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err
 	childCtx := *ctx
 	childCtx.Context = runCtx
 
-	sem := make(chan struct{}, pf.MaxConcurrency)
+	type flowJob struct {
+		index       int
+		batchParams Params
+	}
 
+	jobs := make(chan flowJob)
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	var firstErr error
@@ -372,37 +419,45 @@ func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err
 		}
 	}
 
+	workerCount := pf.MaxConcurrency
+	if len(batchParamsList) < workerCount {
+		workerCount = len(batchParamsList)
+	}
+
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for job := range jobs {
+				if runCtx.Err() != nil && pf.FailFast {
+					setErr(runCtx.Err())
+					return
+				}
+
+				_, err := pf.orchestrate(&childCtx, job.batchParams)
+				if err != nil {
+					setErr(wrapErr(StageBatch, "", fmt.Sprintf("parallel batch flow item failed index=%d", job.index), err))
+					return
+				}
+			}
+		}()
+	}
+
+enqueue:
 	for i, batchParams := range batchParamsList {
 		if runCtx.Err() != nil && pf.FailFast {
 			break
 		}
 
-		i := i
-		batchParams := batchParams
-
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			select {
-			case <-runCtx.Done():
-				setErr(runCtx.Err())
-				return
-			case sem <- struct{}{}:
-			}
-
-			defer func() {
-				<-sem
-			}()
-
-			_, err := pf.orchestrate(&childCtx, batchParams)
-			if err != nil {
-				setErr(wrapErr(StageBatch, "", fmt.Sprintf("parallel batch flow item failed index=%d", i), err))
-				return
-			}
-		}()
+		select {
+		case <-runCtx.Done():
+			setErr(runCtx.Err())
+			break enqueue
+		case jobs <- flowJob{index: i, batchParams: batchParams}:
+		}
 	}
+	close(jobs)
 
 	wg.Wait()
 
