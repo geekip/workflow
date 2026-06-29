@@ -327,3 +327,5 @@ if err := flow.Validate(); err != nil {
 
 action, err := flow.RunWithContext(rc)
 ```
+
+生产环境接入 OpenTelemetry、持久化审计和统一 Runner 时，参考 [生产接入模板](PRODUCTION.md)。

@@ -87,7 +87,7 @@ case result := <-work:
 
 `EventSink` 默认是同步调用。sink panic 会被恢复并记录，不会中断主流程。
 
-库提供轻量 `AsyncEventSink`，用于把慢观测逻辑和主流程隔离。它使用内存缓冲，缓冲区满时保留 backpressure。
+库提供轻量 `AsyncEventSink`，用于把慢观测逻辑和主流程隔离。它使用内存缓冲，缓冲区满时保留 backpressure。`Close` 可重复调用；`Close` 或构造时传入的 `context.Context` 取消后，新的事件会被忽略，已进入缓冲区的事件会被尽力转发后再退出。
 
 如果需要持久化事件、丢弃策略、批量发送、跨进程队列或复杂 backpressure，建议业务平台在 `EventSink` 外层实现。
 

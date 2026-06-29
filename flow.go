@@ -419,10 +419,7 @@ func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err
 		}
 	}
 
-	workerCount := pf.MaxConcurrency
-	if len(batchParamsList) < workerCount {
-		workerCount = len(batchParamsList)
-	}
+	workerCount := normalizeWorkerCount(pf.MaxConcurrency, len(batchParamsList))
 
 	for worker := 0; worker < workerCount; worker++ {
 		wg.Add(1)

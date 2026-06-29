@@ -59,6 +59,39 @@ func TestAsyncEventSink(t *testing.T) {
 	}
 }
 
+func TestAsyncEventSinkLifecycleEdges(t *testing.T) {
+	t.Run("close is idempotent and emit after close is ignored", func(t *testing.T) {
+		sink := NewAsyncEventSink(context.Background(), 1, EventSinkFunc(func(event Event) {}))
+
+		sink.Emit(Event{Type: EventFlowStarted})
+		sink.Close()
+		sink.Close()
+		sink.Emit(Event{Type: EventFlowFinished})
+	})
+
+	t.Run("context cancellation drains buffered events", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		received := make(chan Event, 2)
+		sink := NewAsyncEventSink(ctx, 2, EventSinkFunc(func(event Event) {
+			received <- event
+		}))
+
+		sink.Emit(Event{Type: EventFlowStarted})
+		sink.Emit(Event{Type: EventFlowFinished})
+		cancel()
+		sink.Close()
+
+		got := []EventType{
+			receiveEventType(t, received),
+			receiveEventType(t, received),
+		}
+		want := []EventType{EventFlowStarted, EventFlowFinished}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("events = %#v, want %#v", got, want)
+		}
+	})
+}
+
 func TestFlowValidate(t *testing.T) {
 	t.Run("valid graph", func(t *testing.T) {
 		start := NewFuncNode(NodeMeta{ID: "start"})
@@ -483,6 +516,52 @@ func TestDefaultBatchFlows(t *testing.T) {
 	}
 }
 
+func TestParallelRuntimeNormalizesInvalidMaxConcurrency(t *testing.T) {
+	node := NewParallelBatchNode(NodeMeta{ID: "runtime-parallel-node"}, 2)
+	node.MaxConcurrency = 0
+	node.SetPrep(func(ctx *RunContext) ([]any, error) {
+		return []any{1, 2, 3}, nil
+	})
+	node.SetExecItem(func(ctx *RunContext, item any, index int) (any, error) {
+		return item, nil
+	})
+	node.SetPost(func(ctx *RunContext, items []any, results []any) (string, error) {
+		if !reflect.DeepEqual(results, []any{1, 2, 3}) {
+			t.Fatalf("results = %#v, want [1 2 3]", results)
+		}
+		return "done", nil
+	})
+
+	action, err := node.Run(NewRunContext(context.Background(), nil, nil))
+	if err != nil {
+		t.Fatalf("ParallelBatchNode returned error: %v", err)
+	}
+	if action != "done" {
+		t.Fatalf("action = %q, want done", action)
+	}
+
+	start := NewFuncNode(NodeMeta{ID: "runtime-parallel-flow-start"}).
+		SetExec(func(ctx *RunContext, prepResult any) (any, error) {
+			return nil, nil
+		})
+	flow := NewParallelBatchFlow("runtime-parallel-flow", start, 2)
+	flow.MaxConcurrency = -1
+	flow.SetPrepBatch(func(ctx *RunContext) ([]Params, error) {
+		return []Params{{"id": 1}, {"id": 2}}, nil
+	})
+	flow.SetPostBatch(func(ctx *RunContext, batchParams []Params) (string, error) {
+		return "flow_done", nil
+	})
+
+	action, err = flow.RunWithContext(NewRunContext(context.Background(), nil, nil))
+	if err != nil {
+		t.Fatalf("ParallelBatchFlow returned error: %v", err)
+	}
+	if action != "flow_done" {
+		t.Fatalf("action = %q, want flow_done", action)
+	}
+}
+
 func TestValidationErrorEmptyFormatting(t *testing.T) {
 	err := (*ValidationError)(nil).Error()
 	if err != "workflow validation failed" {
@@ -531,4 +610,16 @@ func mustPanic(t *testing.T, f func()) {
 	}()
 
 	f()
+}
+
+func receiveEventType(t *testing.T, events <-chan Event) EventType {
+	t.Helper()
+
+	select {
+	case event := <-events:
+		return event.Type
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event")
+		return ""
+	}
 }

@@ -18,6 +18,7 @@
 
 - [完整使用文档](docs/USAGE.md)
 - [设计边界](docs/DESIGN.md)
+- [生产接入模板](docs/PRODUCTION.md)
 
 ## 执行原理
 
@@ -49,12 +50,6 @@ Prep -> 对每个 item 执行 ExecItem(可重试/FallbackItem) -> Post -> action
 
 ```bash
 go get github.com/geekip/workflow
-```
-
-如果你在本地多模块项目中使用，可以在调用方 `go.mod` 中通过 `replace` 指向本目录：
-
-```go
-replace github.com/geekip/workflow => /data/llm/workflow
 ```
 
 ## 快速开始
@@ -283,6 +278,8 @@ asyncSink := workflow.NewAsyncEventSink(context.Background(), 1024, rc.Events)
 defer asyncSink.Close()
 rc.Events = asyncSink
 ```
+
+`AsyncEventSink` 的 `Close` 可重复调用。调用 `Close` 或构造时传入的 `context.Context` 取消后，新的 `Emit` 会被忽略，已进入缓冲区的事件会被尽力转发后再退出。
 
 事件类型包括：
 

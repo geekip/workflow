@@ -360,10 +360,7 @@ func (n *ParallelBatchNode) Run(ctx *RunContext) (action string, err error) {
 		}
 	}
 
-	workerCount := n.MaxConcurrency
-	if len(items) < workerCount {
-		workerCount = len(items)
-	}
+	workerCount := normalizeWorkerCount(n.MaxConcurrency, len(items))
 
 	for worker := 0; worker < workerCount; worker++ {
 		wg.Add(1)
@@ -432,4 +429,17 @@ enqueue:
 	})
 
 	return action, nil
+}
+
+func normalizeWorkerCount(maxConcurrency int, itemCount int) int {
+	if itemCount <= 0 {
+		return 0
+	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = 8
+	}
+	if itemCount < maxConcurrency {
+		return itemCount
+	}
+	return maxConcurrency
 }

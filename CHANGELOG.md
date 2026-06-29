@@ -13,6 +13,7 @@
 - 增加返回 error 的构造函数，减少库使用方对 panic 构造路径的依赖。
 - `ParallelBatchNode` 和 `ParallelBatchFlow` 改为固定 worker pool，避免大批量任务创建过多 goroutine。
 - 增加轻量 `AsyncEventSink`。
+- 增加生产接入模板，覆盖 OpenTelemetry、持久化审计和统一 Runner 示例。
 - 增加 CI、benchmark 和设计边界文档。
 
 ## v0.1.0
