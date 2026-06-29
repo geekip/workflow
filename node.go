@@ -2,8 +2,10 @@ package workflow
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -18,10 +20,21 @@ func normalizeAction(action string) string {
 	return action
 }
 
+// BackoffStrategy 定义重试等待时间的计算方式。
+type BackoffStrategy string
+
+const (
+	BackoffFixed       BackoffStrategy = "fixed"
+	BackoffExponential BackoffStrategy = "exponential"
+)
+
 // RetryPolicy 控制 Exec 的尝试次数和每次尝试之间的等待时间。
 type RetryPolicy struct {
 	MaxRetries int
 	Wait       time.Duration
+	MaxWait    time.Duration
+	Backoff    BackoffStrategy
+	Jitter     time.Duration
 }
 
 // normalize 使用安全默认值修正无效的零值配置。
@@ -32,8 +45,42 @@ func (p RetryPolicy) normalize() RetryPolicy {
 	if p.Wait < 0 {
 		p.Wait = 0
 	}
+	if p.MaxWait < 0 {
+		p.MaxWait = 0
+	}
+	if p.Jitter < 0 {
+		p.Jitter = 0
+	}
+	if p.Backoff == "" {
+		p.Backoff = BackoffFixed
+	}
 
 	return p
+}
+
+// Delay 返回第 attempt 次失败后的重试等待时间，attempt 从 0 开始。
+func (p RetryPolicy) Delay(attempt int) time.Duration {
+	p = p.normalize()
+	delay := p.Wait
+
+	if p.Backoff == BackoffExponential && attempt > 0 && delay > 0 {
+		for i := 0; i < attempt; i++ {
+			if p.MaxWait > 0 && delay >= p.MaxWait {
+				delay = p.MaxWait
+				break
+			}
+			delay *= 2
+		}
+	}
+
+	if p.MaxWait > 0 && delay > p.MaxWait {
+		delay = p.MaxWait
+	}
+	if p.Jitter > 0 {
+		delay += randomDuration(p.Jitter)
+	}
+
+	return delay
 }
 
 // sleepContext 等待 d 时长；如果 ctx 被取消，则提前返回。
@@ -147,6 +194,31 @@ func (c *CoreNode) SetRetry(maxRetries int, wait time.Duration) *CoreNode {
 		Wait:       wait,
 	}
 
+	return c
+}
+
+// SetRetryPolicy 替换节点完整重试策略。
+func (c *CoreNode) SetRetryPolicy(policy RetryPolicy) *CoreNode {
+	if policy.MaxRetries < 1 {
+		panic("maxRetries must be at least 1")
+	}
+	if policy.Wait < 0 {
+		panic("wait cannot be negative")
+	}
+	if policy.MaxWait < 0 {
+		panic("maxWait cannot be negative")
+	}
+	if policy.Jitter < 0 {
+		panic("jitter cannot be negative")
+	}
+	if policy.Backoff != "" && policy.Backoff != BackoffFixed && policy.Backoff != BackoffExponential {
+		panic("unsupported backoff strategy")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.retry = policy.normalize()
 	return c
 }
 
@@ -392,7 +464,7 @@ func (n *FuncNode) execWithRetry(ctx *RunContext, prepResult any) (result any, e
 		lastErr = err
 
 		if i < policy.MaxRetries-1 {
-			if err := sleepContext(ctx, policy.Wait); err != nil {
+			if err := sleepContext(ctx, policy.Delay(i)); err != nil {
 				return nil, wrapErr(StageExec, meta.ID, "context cancelled during retry wait", err)
 			}
 		}
@@ -427,4 +499,17 @@ func (n *FuncNode) emitFailed(ctx *RunContext, meta NodeMeta, startedAt time.Tim
 		EndedAt:  time.Now(),
 		Duration: time.Since(startedAt),
 	})
+}
+
+func randomDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)+1))
+	if err != nil {
+		return 0
+	}
+
+	return time.Duration(n.Int64())
 }

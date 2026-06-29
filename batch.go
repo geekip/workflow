@@ -173,7 +173,7 @@ func (n *BatchNode) execItemWithRetry(ctx *RunContext, item any, index int) (res
 		lastErr = err
 
 		if i < policy.MaxRetries-1 {
-			if err := sleepContext(ctx, policy.Wait); err != nil {
+			if err := sleepContext(ctx, policy.Delay(i)); err != nil {
 				return nil, wrapErr(StageExec, meta.ID, "context cancelled during batch retry wait", err)
 			}
 		}
@@ -241,6 +241,30 @@ func NewParallelBatchNode(meta NodeMeta, maxConcurrency int) *ParallelBatchNode 
 		MaxConcurrency: maxConcurrency,
 		FailFast:       true,
 	}
+}
+
+// SetPrep 替换批处理准备回调，并返回 ParallelBatchNode 以支持链式调用。
+func (n *ParallelBatchNode) SetPrep(f BatchPrepFunc) *ParallelBatchNode {
+	n.PrepFunc = f
+	return n
+}
+
+// SetExecItem 替换逐项执行回调，并返回 ParallelBatchNode 以支持链式调用。
+func (n *ParallelBatchNode) SetExecItem(f BatchExecItemFunc) *ParallelBatchNode {
+	n.ExecItemFunc = f
+	return n
+}
+
+// SetPost 替换批处理收尾回调，并返回 ParallelBatchNode 以支持链式调用。
+func (n *ParallelBatchNode) SetPost(f BatchPostFunc) *ParallelBatchNode {
+	n.PostFunc = f
+	return n
+}
+
+// SetFallbackItem 替换逐项兜底回调，并返回 ParallelBatchNode 以支持链式调用。
+func (n *ParallelBatchNode) SetFallbackItem(f BatchFallbackItemFunc) *ParallelBatchNode {
+	n.FallbackItemFunc = f
+	return n
 }
 
 // Run 并发处理准备好的 item，并按输入索引保存结果。

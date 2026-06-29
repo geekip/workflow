@@ -121,7 +121,27 @@ node.SetFallback(func(ctx *workflow.RunContext, prepResult any, lastErr error) (
 - `Exec` 全部失败且配置了 fallback，则 fallback 结果作为 `execResult` 进入 `Post`。
 - `Exec` 全部失败且未配置 fallback，则返回 `WorkflowError`。
 
-## 节点级超时
+需要指数退避时使用完整重试策略：
+
+```go
+node.Core().SetRetryPolicy(workflow.RetryPolicy{
+	MaxRetries: 3,
+	Wait:       200 * time.Millisecond,
+	MaxWait:    2 * time.Second,
+	Backoff:    workflow.BackoffExponential,
+	Jitter:     100 * time.Millisecond,
+})
+```
+
+## 超时
+
+流程级超时：
+
+```go
+flow.SetTimeout(30 * time.Second)
+```
+
+节点级超时：
 
 ```go
 node.Core().SetTimeout(3 * time.Second)
@@ -232,9 +252,22 @@ _, err := flow.RunWithContext(rc)
 ```go
 var wfErr *workflow.WorkflowError
 if errors.As(err, &wfErr) {
-	fmt.Println(wfErr.Stage, wfErr.NodeID, wfErr.Msg)
+	fmt.Println(wfErr.Code, wfErr.Stage, wfErr.NodeID, wfErr.Msg)
 }
 ```
+
+常见错误码：
+
+- `prep_failed`
+- `exec_failed`
+- `post_failed`
+- `fallback_failed`
+- `flow_failed`
+- `batch_failed`
+- `timeout`
+- `cancelled`
+- `panic`
+- `validation_failed`
 
 常见阶段：
 

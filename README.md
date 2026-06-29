@@ -11,13 +11,13 @@
 - **串行/并行批处理**：同时提供 `BatchNode`、`ParallelBatchNode`、`BatchFlow`、`ParallelBatchFlow`。
 - **运行期共享状态**：`Shared` 是并发安全的 key/value 存储，可在节点间传递中间状态。
 - **生命周期事件**：通过 `EventSink` 订阅流程和节点开始、结束、失败事件，便于日志、指标和追踪。
-- **错误上下文清晰**：`WorkflowError` 带有 stage、nodeID、msg 和原始 cause，支持 `errors.As`/`errors.Is`。
-- **生产防护增强**：支持静态图校验、节点级超时、panic 转错误、默认 RunID、事件接收器 panic 隔离。
+- **错误上下文清晰**：`WorkflowError` 带有 code、stage、nodeID、msg 和原始 cause，支持 `errors.As`/`errors.Is`。
+- **运行防护增强**：支持静态图校验、流程级/节点级超时、panic 转错误、默认 RunID、事件接收器 panic 隔离。
 
 ## 文档导航
 
 - [完整使用文档](docs/USAGE.md)
-- [生产环境接入建议](docs/PRODUCTION.md)
+- [设计边界](docs/DESIGN.md)
 
 ## 执行原理
 
@@ -45,16 +45,16 @@ Prep -> 对每个 item 执行 ExecItem(可重试/FallbackItem) -> Post -> action
 
 ## 安装
 
-当前模块名是 `workflow`：
+当前模块路径是 `github.com/geekip/workflow`：
 
 ```bash
-go get workflow
+go get github.com/geekip/workflow
 ```
 
 如果你在本地多模块项目中使用，可以在调用方 `go.mod` 中通过 `replace` 指向本目录：
 
 ```go
-replace workflow => /data/llm/workflow
+replace github.com/geekip/workflow => /data/llm/workflow
 ```
 
 ## 快速开始
@@ -66,7 +66,7 @@ import (
 	"context"
 	"fmt"
 
-	"workflow"
+	"github.com/geekip/workflow"
 )
 
 func main() {
@@ -155,7 +155,7 @@ snapshot := ctx.Shared.Snapshot()
 
 ## 重试与降级
 
-`CoreNode.SetRetry` 配置 `Exec` 的最大尝试次数和间隔：
+`CoreNode.SetRetry` 配置 `Exec` 的最大尝试次数和固定间隔：
 
 ```go
 node := workflow.NewFuncNode(workflow.NodeMeta{ID: "call-api"})
@@ -170,6 +170,18 @@ node.SetFallback(func(ctx *workflow.RunContext, prepResult any, lastErr error) (
 - 如果配置了 `FallbackFunc`，使用 fallback 结果继续进入 `Post`。
 - 如果没有配置 fallback，返回 `WorkflowError`，stage 为 `exec`。
 
+需要指数退避时使用 `SetRetryPolicy`：
+
+```go
+node.Core().SetRetryPolicy(workflow.RetryPolicy{
+	MaxRetries: 3,
+	Wait:       200 * time.Millisecond,
+	MaxWait:    2 * time.Second,
+	Backoff:    workflow.BackoffExponential,
+	Jitter:     100 * time.Millisecond,
+})
+```
+
 ## 静态校验与超时
 
 服务启动时建议先执行 `Validate`，提前发现空起点、空后继、重复节点 ID 和环路：
@@ -180,9 +192,10 @@ if err := flow.Validate(); err != nil {
 }
 ```
 
-节点级超时通过 `CoreNode.SetTimeout` 设置。超时依赖节点代码尊重 `ctx.Done()`：
+流程级超时通过 `Flow.SetTimeout` 设置，节点级超时通过 `CoreNode.SetTimeout` 设置。超时依赖节点代码尊重 `ctx.Done()`：
 
 ```go
+flow.SetTimeout(30 * time.Second)
 node.Core().SetTimeout(3 * time.Second)
 ```
 
@@ -269,7 +282,7 @@ _, err := flow.RunWithContext(rc)
 ```go
 var wfErr *workflow.WorkflowError
 if errors.As(err, &wfErr) {
-	fmt.Println(wfErr.Stage, wfErr.NodeID, wfErr.Msg)
+	fmt.Println(wfErr.Code, wfErr.Stage, wfErr.NodeID, wfErr.Msg)
 }
 ```
 

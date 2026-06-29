@@ -15,6 +15,7 @@ type ValidationIssue struct {
 
 // ValidationError 聚合工作流静态校验发现的全部问题。
 type ValidationError struct {
+	Code   ErrorCode
 	Issues []ValidationIssue
 }
 
@@ -42,10 +43,10 @@ func (e *ValidationError) Error() string {
 // 如果业务需要显式循环，应跳过该校验或在更高层提供循环次数/退出条件保护。
 func (f *Flow) Validate() error {
 	if f == nil {
-		return &ValidationError{Issues: []ValidationIssue{{Msg: "flow is nil"}}}
+		return &ValidationError{Code: ErrCodeValidation, Issues: []ValidationIssue{{Msg: "flow is nil"}}}
 	}
 	if f.Start == nil {
-		return &ValidationError{Issues: []ValidationIssue{{Msg: "flow start node is nil"}}}
+		return &ValidationError{Code: ErrCodeValidation, Issues: []ValidationIssue{{Msg: "flow start node is nil"}}}
 	}
 
 	v := flowValidator{
@@ -58,7 +59,7 @@ func (f *Flow) Validate() error {
 		return nil
 	}
 
-	return &ValidationError{Issues: v.issues}
+	return &ValidationError{Code: ErrCodeValidation, Issues: v.issues}
 }
 
 type flowValidator struct {

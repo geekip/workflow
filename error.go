@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 )
@@ -18,8 +20,25 @@ const (
 	StagePanic    Stage = "panic"
 )
 
+// ErrorCode 是稳定的轻量错误码，便于业务平台分类处理。
+type ErrorCode string
+
+const (
+	ErrCodePrepFailed     ErrorCode = "prep_failed"
+	ErrCodeExecFailed     ErrorCode = "exec_failed"
+	ErrCodePostFailed     ErrorCode = "post_failed"
+	ErrCodeFallbackFailed ErrorCode = "fallback_failed"
+	ErrCodeFlowFailed     ErrorCode = "flow_failed"
+	ErrCodeBatchFailed    ErrorCode = "batch_failed"
+	ErrCodeTimeout        ErrorCode = "timeout"
+	ErrCodeCancelled      ErrorCode = "cancelled"
+	ErrCodePanic          ErrorCode = "panic"
+	ErrCodeValidation     ErrorCode = "validation_failed"
+)
+
 // WorkflowError 使用工作流阶段和节点上下文包装底层错误。
 type WorkflowError struct {
+	Code   ErrorCode
 	Stage  Stage
 	NodeID string
 	Msg    string
@@ -31,7 +50,8 @@ type WorkflowError struct {
 func (e *WorkflowError) Error() string {
 	if e.Cause != nil {
 		return fmt.Sprintf(
-			"workflow error: stage=%s node=%s msg=%s cause=%v",
+			"workflow error: code=%s stage=%s node=%s msg=%s cause=%v",
+			e.Code,
 			e.Stage,
 			e.NodeID,
 			e.Msg,
@@ -40,7 +60,8 @@ func (e *WorkflowError) Error() string {
 	}
 
 	return fmt.Sprintf(
-		"workflow error: stage=%s node=%s msg=%s",
+		"workflow error: code=%s stage=%s node=%s msg=%s",
+		e.Code,
 		e.Stage,
 		e.NodeID,
 		e.Msg,
@@ -50,6 +71,7 @@ func (e *WorkflowError) Error() string {
 // wrapPanic 将 panic 转换为 WorkflowError，并保留调用栈便于诊断。
 func wrapPanic(stage Stage, nodeID string, msg string, recovered any) error {
 	return &WorkflowError{
+		Code:   ErrCodePanic,
 		Stage:  stage,
 		NodeID: nodeID,
 		Msg:    msg,
@@ -70,9 +92,36 @@ func wrapErr(stage Stage, nodeID string, msg string, err error) error {
 	}
 
 	return &WorkflowError{
+		Code:   errorCodeFor(stage, err),
 		Stage:  stage,
 		NodeID: nodeID,
 		Msg:    msg,
 		Cause:  err,
+	}
+}
+
+func errorCodeFor(stage Stage, err error) ErrorCode {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return ErrCodeTimeout
+	case errors.Is(err, context.Canceled):
+		return ErrCodeCancelled
+	}
+
+	switch stage {
+	case StagePrep:
+		return ErrCodePrepFailed
+	case StageExec:
+		return ErrCodeExecFailed
+	case StageFallback:
+		return ErrCodeFallbackFailed
+	case StagePost:
+		return ErrCodePostFailed
+	case StageBatch:
+		return ErrCodeBatchFailed
+	case StagePanic:
+		return ErrCodePanic
+	default:
+		return ErrCodeFlowFailed
 	}
 }

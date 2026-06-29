@@ -17,8 +17,9 @@ type Flow struct {
 	Name        string
 	Description string
 
-	Start  Node
-	Params Params
+	Start   Node
+	Params  Params
+	timeout time.Duration
 }
 
 // NewFlow 使用指定 id 和起始节点创建工作流。
@@ -37,6 +38,21 @@ func NewFlow(id string, start Node) *Flow {
 // SetParams 替换流程级默认参数。
 func (f *Flow) SetParams(params Params) *Flow {
 	f.Params = CopyParams(params)
+	return f
+}
+
+// Timeout 返回流程级超时时长；0 表示不设置流程级超时。
+func (f *Flow) Timeout() time.Duration {
+	return f.timeout
+}
+
+// SetTimeout 配置流程级超时时长；0 表示不设置流程级超时。
+func (f *Flow) SetTimeout(timeout time.Duration) *Flow {
+	if timeout < 0 {
+		panic("timeout cannot be negative")
+	}
+
+	f.timeout = timeout
 	return f
 }
 
@@ -61,6 +77,11 @@ func (f *Flow) RunWithContext(ctx *RunContext) (action string, err error) {
 	}
 	if ctx.RunID == "" {
 		ctx.RunID = newRunID()
+	}
+	if f.timeout > 0 {
+		runCtx, cancel := context.WithTimeout(ctx.Context, f.timeout)
+		defer cancel()
+		ctx.Context = runCtx
 	}
 
 	startedAt := time.Now()
@@ -155,6 +176,9 @@ func (f *Flow) orchestrate(ctx *RunContext, batchParams Params) (string, error) 
 				return "", err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return "", wrapErr(StageFlow, meta.ID, "flow context cancelled after node run", err)
+		}
 
 		lastAction = normalizeAction(action)
 		current = core.GetNext(lastAction)
@@ -210,6 +234,11 @@ func (bf *BatchFlow) RunWithContext(ctx *RunContext) (action string, err error) 
 	}
 	if ctx.RunID == "" {
 		ctx.RunID = newRunID()
+	}
+	if bf.timeout > 0 {
+		runCtx, cancel := context.WithTimeout(ctx.Context, bf.timeout)
+		defer cancel()
+		ctx.Context = runCtx
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -268,6 +297,18 @@ func NewParallelBatchFlow(id string, start Node, maxConcurrency int) *ParallelBa
 	}
 }
 
+// SetPrepBatch 替换用于准备每次运行参数集的钩子，并返回 ParallelBatchFlow 以支持链式调用。
+func (pf *ParallelBatchFlow) SetPrepBatch(f func(ctx *RunContext) ([]Params, error)) *ParallelBatchFlow {
+	pf.PrepBatchFunc = f
+	return pf
+}
+
+// SetPostBatch 替换所有批处理项完成后运行的钩子，并返回 ParallelBatchFlow 以支持链式调用。
+func (pf *ParallelBatchFlow) SetPostBatch(f func(ctx *RunContext, batchParams []Params) (string, error)) *ParallelBatchFlow {
+	pf.PostBatchFunc = f
+	return pf
+}
+
 // RunWithContext 并发执行批处理流程项，并在所有项成功后运行 PostBatch。
 func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err error) {
 	if pf.Start == nil {
@@ -281,6 +322,11 @@ func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err
 	}
 	if ctx.RunID == "" {
 		ctx.RunID = newRunID()
+	}
+	if pf.timeout > 0 {
+		runCtx, cancel := context.WithTimeout(ctx.Context, pf.timeout)
+		defer cancel()
+		ctx.Context = runCtx
 	}
 	defer func() {
 		if r := recover(); r != nil {

@@ -184,6 +184,31 @@ func TestNodeTimeout(t *testing.T) {
 	if wfErr.Stage != StageFlow || wfErr.NodeID != "timeout" {
 		t.Fatalf("WorkflowError = stage:%s node:%s, want flow/timeout", wfErr.Stage, wfErr.NodeID)
 	}
+	if wfErr.Code != ErrCodeTimeout {
+		t.Fatalf("code = %s, want %s", wfErr.Code, ErrCodeTimeout)
+	}
+}
+
+func TestFlowTimeout(t *testing.T) {
+	node := NewFuncNode(NodeMeta{ID: "flow-timeout"}).
+		SetExec(func(ctx *RunContext, prepResult any) (any, error) {
+			<-ctx.Done()
+			return nil, nil
+		})
+	flow := NewFlow("flow-timeout", node).SetTimeout(10 * time.Millisecond)
+
+	_, err := flow.RunWithContext(NewRunContext(context.Background(), nil, nil))
+	if err == nil {
+		t.Fatal("RunWithContext expected timeout error, got nil")
+	}
+
+	var wfErr *WorkflowError
+	if !errors.As(err, &wfErr) {
+		t.Fatalf("error %T should be WorkflowError", err)
+	}
+	if wfErr.Code != ErrCodeTimeout {
+		t.Fatalf("code = %s, want %s", wfErr.Code, ErrCodeTimeout)
+	}
 }
 
 func TestFlowAndNodeErrorEdges(t *testing.T) {
@@ -202,6 +227,9 @@ func TestFlowAndNodeErrorEdges(t *testing.T) {
 	var wfErr *WorkflowError
 	if !errors.As(err, &wfErr) || wfErr.Stage != StageFlow {
 		t.Fatalf("error = %v, want flow WorkflowError", err)
+	}
+	if wfErr.Code != ErrCodeCancelled {
+		t.Fatalf("code = %s, want %s", wfErr.Code, ErrCodeCancelled)
 	}
 
 	if err := sleepContext(cancelled, time.Second); err == nil {
@@ -271,9 +299,133 @@ func TestWorkflowErrorFormattingAndWrapNil(t *testing.T) {
 		t.Fatalf("wrapErr(nil) = %v, want nil", err)
 	}
 
-	err := (&WorkflowError{Stage: StageExec, NodeID: "node", Msg: "message"}).Error()
-	if !strings.Contains(err, "stage=exec") || strings.Contains(err, "cause=") {
+	err := (&WorkflowError{Code: ErrCodeExecFailed, Stage: StageExec, NodeID: "node", Msg: "message"}).Error()
+	if !strings.Contains(err, "code=exec_failed") || !strings.Contains(err, "stage=exec") || strings.Contains(err, "cause=") {
 		t.Fatalf("unexpected WorkflowError string: %s", err)
+	}
+}
+
+func TestRetryPolicyDelayAndValidation(t *testing.T) {
+	policy := RetryPolicy{
+		MaxRetries: 4,
+		Wait:       10 * time.Millisecond,
+		MaxWait:    25 * time.Millisecond,
+		Backoff:    BackoffExponential,
+	}
+
+	if got := policy.Delay(0); got != 10*time.Millisecond {
+		t.Fatalf("Delay(0) = %s, want 10ms", got)
+	}
+	if got := policy.Delay(1); got != 20*time.Millisecond {
+		t.Fatalf("Delay(1) = %s, want 20ms", got)
+	}
+	if got := policy.Delay(2); got != 25*time.Millisecond {
+		t.Fatalf("Delay(2) = %s, want capped 25ms", got)
+	}
+
+	node := NewFuncNode(NodeMeta{ID: "retry-policy"})
+	node.Core().SetRetryPolicy(policy)
+	if got := node.Core().Retry().Backoff; got != BackoffExponential {
+		t.Fatalf("Backoff = %s, want %s", got, BackoffExponential)
+	}
+
+	jitterPolicy := RetryPolicy{
+		MaxRetries: 2,
+		Wait:       10 * time.Millisecond,
+		Jitter:     time.Nanosecond,
+	}
+	if got := jitterPolicy.Delay(0); got < 10*time.Millisecond || got > 10*time.Millisecond+time.Nanosecond {
+		t.Fatalf("jitter delay = %s, want [10ms, 10ms+1ns]", got)
+	}
+}
+
+func TestCoreAndFlowOptionPanicsAndDefaults(t *testing.T) {
+	mustPanic(t, func() {
+		NewFlow("", nil)
+	})
+	mustPanic(t, func() {
+		NewCoreNode(NodeMeta{})
+	})
+	mustPanic(t, func() {
+		NewFuncNode(NodeMeta{ID: "retry"}).Core().SetRetry(0, 0)
+	})
+	mustPanic(t, func() {
+		NewFuncNode(NodeMeta{ID: "retry"}).Core().SetRetry(1, -time.Nanosecond)
+	})
+	mustPanic(t, func() {
+		NewFuncNode(NodeMeta{ID: "retry"}).Core().SetRetryPolicy(RetryPolicy{MaxRetries: 1, Backoff: "bad"})
+	})
+	mustPanic(t, func() {
+		NewFuncNode(NodeMeta{ID: "timeout"}).Core().SetTimeout(-time.Nanosecond)
+	})
+	mustPanic(t, func() {
+		NewFlow("timeout", NewFuncNode(NodeMeta{ID: "start"})).SetTimeout(-time.Nanosecond)
+	})
+	mustPanic(t, func() {
+		NewFuncNode(NodeMeta{ID: "next"}).Core().NextAction("x", nil)
+	})
+
+	flow := NewFlow("timeout", NewFuncNode(NodeMeta{ID: "start"})).SetTimeout(time.Second)
+	if got := flow.Timeout(); got != time.Second {
+		t.Fatalf("Flow.Timeout() = %s, want 1s", got)
+	}
+
+	parallelNode := NewParallelBatchNode(NodeMeta{ID: "default-parallel"}, 0)
+	if parallelNode.MaxConcurrency != 8 {
+		t.Fatalf("default MaxConcurrency = %d, want 8", parallelNode.MaxConcurrency)
+	}
+
+	parallelFlow := NewParallelBatchFlow("default-parallel-flow", NewFuncNode(NodeMeta{ID: "start"}), 0)
+	if parallelFlow.MaxConcurrency != 8 {
+		t.Fatalf("default flow MaxConcurrency = %d, want 8", parallelFlow.MaxConcurrency)
+	}
+}
+
+func TestDefaultBatchFlows(t *testing.T) {
+	start := NewFuncNode(NodeMeta{ID: "start"})
+
+	action, err := NewBatchFlow("default-batch", start).RunWithContext(NewRunContext(context.Background(), nil, nil))
+	if err != nil {
+		t.Fatalf("BatchFlow returned error: %v", err)
+	}
+	if action != DefaultAction {
+		t.Fatalf("BatchFlow action = %q, want %q", action, DefaultAction)
+	}
+
+	action, err = NewParallelBatchFlow("default-parallel-batch", start, 0).RunWithContext(NewRunContext(context.Background(), nil, nil))
+	if err != nil {
+		t.Fatalf("ParallelBatchFlow returned error: %v", err)
+	}
+	if action != DefaultAction {
+		t.Fatalf("ParallelBatchFlow action = %q, want %q", action, DefaultAction)
+	}
+}
+
+func TestValidationErrorEmptyFormatting(t *testing.T) {
+	err := (*ValidationError)(nil).Error()
+	if err != "workflow validation failed" {
+		t.Fatalf("nil ValidationError string = %q", err)
+	}
+}
+
+func TestParallelChainMethodsReturnConcreteTypes(t *testing.T) {
+	parallelNode := NewParallelBatchNode(NodeMeta{ID: "chain-node"}, 2).
+		SetPrep(func(ctx *RunContext) ([]any, error) { return []any{1}, nil }).
+		SetExecItem(func(ctx *RunContext, item any, index int) (any, error) { return item, nil }).
+		SetFallbackItem(func(ctx *RunContext, item any, index int, lastErr error) (any, error) { return item, nil }).
+		SetPost(func(ctx *RunContext, items []any, results []any) (string, error) { return DefaultAction, nil })
+
+	if _, ok := any(parallelNode).(*ParallelBatchNode); !ok {
+		t.Fatalf("chain result type = %T, want *ParallelBatchNode", parallelNode)
+	}
+
+	start := NewFuncNode(NodeMeta{ID: "chain-flow-start"})
+	parallelFlow := NewParallelBatchFlow("chain-flow", start, 2).
+		SetPrepBatch(func(ctx *RunContext) ([]Params, error) { return []Params{{}}, nil }).
+		SetPostBatch(func(ctx *RunContext, batchParams []Params) (string, error) { return DefaultAction, nil })
+
+	if _, ok := any(parallelFlow).(*ParallelBatchFlow); !ok {
+		t.Fatalf("chain result type = %T, want *ParallelBatchFlow", parallelFlow)
 	}
 }
 
@@ -285,4 +437,16 @@ func (nilCoreNode) Core() *CoreNode {
 
 func (nilCoreNode) Run(ctx *RunContext) (string, error) {
 	return "", nil
+}
+
+func mustPanic(t *testing.T, f func()) {
+	t.Helper()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+
+	f()
 }
