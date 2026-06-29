@@ -18,6 +18,7 @@
 
 - [完整使用文档](docs/USAGE.md)
 - [设计边界](docs/DESIGN.md)
+- [LLM/Agent 编排规划](docs/AGENTGRAPH.md)
 - [生产接入模板](docs/PRODUCTION.md)
 
 ## 执行原理
