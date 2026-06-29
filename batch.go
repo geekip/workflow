@@ -78,9 +78,17 @@ func (n *BatchNode) SetFallbackItem(f BatchFallbackItemFunc) *BatchNode {
 }
 
 // Run 串行处理每个准备好的 item，然后使用 Post 的结果进行路由。
-func (n *BatchNode) Run(ctx *RunContext) (string, error) {
+func (n *BatchNode) Run(ctx *RunContext) (action string, err error) {
 	meta := n.core.Meta()
 	startedAt := time.Now()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, meta.ID, "batch node panic", r)
+			n.emitFailed(ctx, meta, startedAt, err)
+			action = ""
+		}
+	}()
 
 	ctx.Emit(Event{
 		Type:      EventNodeStarted,
@@ -114,7 +122,7 @@ func (n *BatchNode) Run(ctx *RunContext) (string, error) {
 		results[i] = result
 	}
 
-	action, err := n.PostFunc(ctx, items, results)
+	action, err = n.PostFunc(ctx, items, results)
 	if err != nil {
 		err = wrapErr(StagePost, meta.ID, "batch post failed", err)
 		n.emitFailed(ctx, meta, startedAt, err)
@@ -139,9 +147,16 @@ func (n *BatchNode) Run(ctx *RunContext) (string, error) {
 }
 
 // execItemWithRetry 按节点重试策略执行单个批处理 item。
-func (n *BatchNode) execItemWithRetry(ctx *RunContext, item any, index int) (any, error) {
+func (n *BatchNode) execItemWithRetry(ctx *RunContext, item any, index int) (result any, err error) {
 	meta := n.core.Meta()
 	policy := n.core.Retry()
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = wrapPanic(StagePanic, meta.ID, fmt.Sprintf("batch item panic index=%d", index), r)
+		}
+	}()
 
 	var lastErr error
 
@@ -229,9 +244,17 @@ func NewParallelBatchNode(meta NodeMeta, maxConcurrency int) *ParallelBatchNode 
 }
 
 // Run 并发处理准备好的 item，并按输入索引保存结果。
-func (n *ParallelBatchNode) Run(ctx *RunContext) (string, error) {
+func (n *ParallelBatchNode) Run(ctx *RunContext) (action string, err error) {
 	meta := n.core.Meta()
 	startedAt := time.Now()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, meta.ID, "parallel batch node panic", r)
+			n.emitFailed(ctx, meta, startedAt, err)
+			action = ""
+		}
+	}()
 
 	ctx.Emit(Event{
 		Type:      EventNodeStarted,
@@ -327,7 +350,7 @@ func (n *ParallelBatchNode) Run(ctx *RunContext) (string, error) {
 		return "", err
 	}
 
-	action, err := n.PostFunc(ctx, items, results)
+	action, err = n.PostFunc(ctx, items, results)
 	if err != nil {
 		err = wrapErr(StagePost, meta.ID, "parallel batch post failed", err)
 		n.emitFailed(ctx, meta, startedAt, err)

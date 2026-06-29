@@ -2,8 +2,12 @@ package workflow
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Params 保存传入流程和节点的运行时参数。
@@ -114,6 +118,8 @@ type RunContext struct {
 	Events EventSink
 }
 
+var fallbackRunSeq uint64
+
 // NewRunContext 创建运行上下文，并为 nil 输入提供安全默认值。
 func NewRunContext(ctx context.Context, shared *Shared, params Params) *RunContext {
 	if ctx == nil {
@@ -128,6 +134,7 @@ func NewRunContext(ctx context.Context, shared *Shared, params Params) *RunConte
 
 	return &RunContext{
 		Context: ctx,
+		RunID:   newRunID(),
 		Params:  CopyParams(params),
 		Shared:  shared,
 	}
@@ -157,6 +164,31 @@ func (rc *RunContext) Logf(format string, args ...any) {
 // Emit 在配置了事件接收器时发送事件。
 func (rc *RunContext) Emit(event Event) {
 	if rc.Events != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				rc.Logf("workflow event sink panic: %v", r)
+			}
+		}()
+
 		rc.Events.Emit(event)
 	}
+}
+
+func newRunID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+
+	seq := atomic.AddUint64(&fallbackRunSeq, 1)
+	return "run-" + time.Now().UTC().Format("20060102150405.000000000") + "-" + hex.EncodeToString([]byte{
+		byte(seq >> 56),
+		byte(seq >> 48),
+		byte(seq >> 40),
+		byte(seq >> 32),
+		byte(seq >> 24),
+		byte(seq >> 16),
+		byte(seq >> 8),
+		byte(seq),
+	})
 }

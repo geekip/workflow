@@ -49,12 +49,35 @@ func (f *Flow) Run(ctx context.Context, shared *Shared, params Params) (string, 
 }
 
 // RunWithContext 使用已有 RunContext 执行流程。
-func (f *Flow) RunWithContext(ctx *RunContext) (string, error) {
+func (f *Flow) RunWithContext(ctx *RunContext) (action string, err error) {
 	if f.Start == nil {
 		return "", errors.New("flow start node is nil")
 	}
+	if ctx == nil {
+		ctx = NewRunContext(nil, nil, nil)
+	}
+	if ctx.FlowID == "" {
+		ctx.FlowID = f.ID
+	}
+	if ctx.RunID == "" {
+		ctx.RunID = newRunID()
+	}
 
 	startedAt := time.Now()
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, "", "flow panic", r)
+			ctx.Emit(Event{
+				Type:     EventFlowFinished,
+				FlowID:   f.ID,
+				RunID:    ctx.RunID,
+				Error:    err.Error(),
+				EndedAt:  time.Now(),
+				Duration: time.Since(startedAt),
+			})
+			action = ""
+		}
+	}()
 
 	ctx.Emit(Event{
 		Type:      EventFlowStarted,
@@ -63,7 +86,7 @@ func (f *Flow) RunWithContext(ctx *RunContext) (string, error) {
 		StartedAt: startedAt,
 	})
 
-	action, err := f.orchestrate(ctx, nil)
+	action, err = f.orchestrate(ctx, nil)
 	if err != nil {
 		ctx.Emit(Event{
 			Type:     EventFlowFinished,
@@ -112,9 +135,25 @@ func (f *Flow) orchestrate(ctx *RunContext, batchParams Params) (string, error) 
 
 		nodeCtx := ctx.WithNode(meta, mergedParams)
 
-		action, err := current.Run(nodeCtx)
-		if err != nil {
-			return "", err
+		timeout := core.Timeout()
+		var action string
+		var err error
+		if timeout > 0 {
+			nodeRunCtx, cancel := context.WithTimeout(nodeCtx.Context, timeout)
+			nodeCtx.Context = nodeRunCtx
+			action, err = current.Run(nodeCtx)
+			cancel()
+			if err == nil && nodeRunCtx.Err() != nil {
+				err = wrapErr(StageFlow, meta.ID, "node context deadline exceeded", nodeRunCtx.Err())
+			}
+			if err != nil {
+				return "", err
+			}
+		} else {
+			action, err = current.Run(nodeCtx)
+			if err != nil {
+				return "", err
+			}
 		}
 
 		lastAction = normalizeAction(action)
@@ -159,10 +198,25 @@ func (bf *BatchFlow) SetPostBatch(f func(ctx *RunContext, batchParams []Params) 
 }
 
 // RunWithContext 串行执行每一组准备好的参数。
-func (bf *BatchFlow) RunWithContext(ctx *RunContext) (string, error) {
+func (bf *BatchFlow) RunWithContext(ctx *RunContext) (action string, err error) {
 	if bf.Start == nil {
 		return "", errors.New("batch flow start node is nil")
 	}
+	if ctx == nil {
+		ctx = NewRunContext(nil, nil, nil)
+	}
+	if ctx.FlowID == "" {
+		ctx.FlowID = bf.ID
+	}
+	if ctx.RunID == "" {
+		ctx.RunID = newRunID()
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, "", "batch flow panic", r)
+			action = ""
+		}
+	}()
 
 	batchParamsList, err := bf.PrepBatchFunc(ctx)
 	if err != nil {
@@ -183,7 +237,7 @@ func (bf *BatchFlow) RunWithContext(ctx *RunContext) (string, error) {
 		}
 	}
 
-	action, err := bf.PostBatchFunc(ctx, batchParamsList)
+	action, err = bf.PostBatchFunc(ctx, batchParamsList)
 	if err != nil {
 		return "", wrapErr(StagePost, "", "batch flow post failed", err)
 	}
@@ -215,10 +269,25 @@ func NewParallelBatchFlow(id string, start Node, maxConcurrency int) *ParallelBa
 }
 
 // RunWithContext 并发执行批处理流程项，并在所有项成功后运行 PostBatch。
-func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (string, error) {
+func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (action string, err error) {
 	if pf.Start == nil {
 		return "", errors.New("parallel batch flow start node is nil")
 	}
+	if ctx == nil {
+		ctx = NewRunContext(nil, nil, nil)
+	}
+	if ctx.FlowID == "" {
+		ctx.FlowID = pf.ID
+	}
+	if ctx.RunID == "" {
+		ctx.RunID = newRunID()
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, "", "parallel batch flow panic", r)
+			action = ""
+		}
+	}()
 
 	batchParamsList, err := pf.PrepBatchFunc(ctx)
 	if err != nil {
@@ -295,7 +364,7 @@ func (pf *ParallelBatchFlow) RunWithContext(ctx *RunContext) (string, error) {
 		return "", firstErr
 	}
 
-	action, err := pf.PostBatchFunc(ctx, batchParamsList)
+	action, err = pf.PostBatchFunc(ctx, batchParamsList)
 	if err != nil {
 		return "", wrapErr(StagePost, "", "parallel batch flow post failed", err)
 	}

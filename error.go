@@ -1,6 +1,9 @@
 package workflow
 
-import "fmt"
+import (
+	"fmt"
+	"runtime/debug"
+)
 
 // Stage 标识错误发生的执行阶段。
 type Stage string
@@ -12,6 +15,7 @@ const (
 	StagePost     Stage = "post"
 	StageFlow     Stage = "flow"
 	StageBatch    Stage = "batch"
+	StagePanic    Stage = "panic"
 )
 
 // WorkflowError 使用工作流阶段和节点上下文包装底层错误。
@@ -20,6 +24,7 @@ type WorkflowError struct {
 	NodeID string
 	Msg    string
 	Cause  error
+	Stack  string
 }
 
 // Error 将阶段、节点、消息和原因格式化为错误字符串。
@@ -40,6 +45,17 @@ func (e *WorkflowError) Error() string {
 		e.NodeID,
 		e.Msg,
 	)
+}
+
+// wrapPanic 将 panic 转换为 WorkflowError，并保留调用栈便于诊断。
+func wrapPanic(stage Stage, nodeID string, msg string, recovered any) error {
+	return &WorkflowError{
+		Stage:  stage,
+		NodeID: nodeID,
+		Msg:    msg,
+		Cause:  fmt.Errorf("panic: %v", recovered),
+		Stack:  string(debug.Stack()),
+	}
 }
 
 // Unwrap 返回底层原因，以支持 errors.Is 和 errors.As。

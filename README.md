@@ -12,6 +12,12 @@
 - **运行期共享状态**：`Shared` 是并发安全的 key/value 存储，可在节点间传递中间状态。
 - **生命周期事件**：通过 `EventSink` 订阅流程和节点开始、结束、失败事件，便于日志、指标和追踪。
 - **错误上下文清晰**：`WorkflowError` 带有 stage、nodeID、msg 和原始 cause，支持 `errors.As`/`errors.Is`。
+- **生产防护增强**：支持静态图校验、节点级超时、panic 转错误、默认 RunID、事件接收器 panic 隔离。
+
+## 文档导航
+
+- [完整使用文档](docs/USAGE.md)
+- [生产环境接入建议](docs/PRODUCTION.md)
 
 ## 执行原理
 
@@ -164,6 +170,24 @@ node.SetFallback(func(ctx *workflow.RunContext, prepResult any, lastErr error) (
 - 如果配置了 `FallbackFunc`，使用 fallback 结果继续进入 `Post`。
 - 如果没有配置 fallback，返回 `WorkflowError`，stage 为 `exec`。
 
+## 静态校验与超时
+
+服务启动时建议先执行 `Validate`，提前发现空起点、空后继、重复节点 ID 和环路：
+
+```go
+if err := flow.Validate(); err != nil {
+	return err
+}
+```
+
+节点级超时通过 `CoreNode.SetTimeout` 设置。超时依赖节点代码尊重 `ctx.Done()`：
+
+```go
+node.Core().SetTimeout(3 * time.Second)
+```
+
+节点、批处理节点和批处理流程中的 panic 会被转换为 `WorkflowError`，stage 为 `panic`，并保留 `Stack` 便于诊断。
+
 ## 批处理节点
 
 `BatchNode` 在一个节点内部处理多个 item，默认串行执行：
@@ -257,6 +281,7 @@ if errors.As(err, &wfErr) {
 - `post`
 - `flow`
 - `batch`
+- `panic`
 
 ## 并发注意事项
 

@@ -75,6 +75,7 @@ type CoreNode struct {
 	meta       NodeMeta
 	params     Params
 	retry      RetryPolicy
+	timeout    time.Duration
 	successors map[string]Node
 	mu         sync.RWMutex
 }
@@ -146,6 +147,27 @@ func (c *CoreNode) SetRetry(maxRetries int, wait time.Duration) *CoreNode {
 		Wait:       wait,
 	}
 
+	return c
+}
+
+// Timeout 返回节点级超时时长；0 表示不设置节点级超时。
+func (c *CoreNode) Timeout() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.timeout
+}
+
+// SetTimeout 配置节点级超时时长；0 表示不设置节点级超时。
+func (c *CoreNode) SetTimeout(timeout time.Duration) *CoreNode {
+	if timeout < 0 {
+		panic("timeout cannot be negative")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.timeout = timeout
 	return c
 }
 
@@ -281,9 +303,17 @@ func (n *FuncNode) SetFallback(f FallbackFunc) *FuncNode {
 }
 
 // Run 执行 Prep、可重试的 Exec 和 Post，并发送节点生命周期事件。
-func (n *FuncNode) Run(ctx *RunContext) (string, error) {
+func (n *FuncNode) Run(ctx *RunContext) (action string, err error) {
 	meta := n.core.Meta()
 	startedAt := time.Now()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = wrapPanic(StagePanic, meta.ID, "node panic", r)
+			n.emitFailed(ctx, meta, startedAt, err)
+			action = ""
+		}
+	}()
 
 	ctx.Emit(Event{
 		Type:      EventNodeStarted,
@@ -308,7 +338,7 @@ func (n *FuncNode) Run(ctx *RunContext) (string, error) {
 		return "", err
 	}
 
-	action, err := n.PostFunc(ctx, prepResult, execResult)
+	action, err = n.PostFunc(ctx, prepResult, execResult)
 	if err != nil {
 		err = wrapErr(StagePost, meta.ID, "post failed", err)
 		n.emitFailed(ctx, meta, startedAt, err)
@@ -336,9 +366,16 @@ func (n *FuncNode) Run(ctx *RunContext) (string, error) {
 //
 // 如果所有尝试都失败且配置了 fallback，则使用 fallback 结果作为 Exec 结果，
 // 节点随后可以继续进入 Post 阶段。
-func (n *FuncNode) execWithRetry(ctx *RunContext, prepResult any) (any, error) {
+func (n *FuncNode) execWithRetry(ctx *RunContext, prepResult any) (result any, err error) {
 	meta := n.core.Meta()
 	policy := n.core.Retry()
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = wrapPanic(StagePanic, meta.ID, "exec panic", r)
+		}
+	}()
 
 	var lastErr error
 
